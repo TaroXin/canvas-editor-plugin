@@ -19,6 +19,8 @@ export default defineConfig(({ mode }) => {
         }
       ],
       build: {
+        // 兼容 webpack 4（acorn 6）等旧构建工具
+        target: 'es2019',
         lib: {
           name,
           fileName: name,
@@ -28,7 +30,7 @@ export default defineConfig(({ mode }) => {
           output: {
             sourcemap: true
           },
-          external: ['@hufe921/canvas-editor']
+          external: ['@baohu/canvas-editor']
         }
       }
     }

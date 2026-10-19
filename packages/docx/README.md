@@ -5,12 +5,12 @@
 ## usage
 
 ```bash
-npm i @hufe921/canvas-editor-plugin-docx --save
+npm i @baohu/canvas-editor-plugin-docx --save
 ```
 
 ```javascript
-import Editor from '@hufe921/canvas-editor'
-import docxPlugin from '@hufe921/canvas-editor-plugin-docx'
+import Editor from '@baohu/canvas-editor'
+import docxPlugin from '@baohu/canvas-editor-plugin-docx'
 
 const instance = new Editor()
 instance.use(docxPlugin)

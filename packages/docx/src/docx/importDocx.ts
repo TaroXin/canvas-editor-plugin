@@ -11,11 +11,11 @@ import {
   ImageDisplay,
   TdBorder,
   ControlType
-} from '@hufe921/canvas-editor'
+} from '@baohu/canvas-editor'
 import JSZip from 'jszip'
 import { measureFontMetrics, parseDocxNumber } from './utils'
 
-declare module '@hufe921/canvas-editor' {
+declare module '@baohu/canvas-editor' {
   interface Command {
     executeImportDocx(options: IImportDocxOption): void
   }

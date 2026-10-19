@@ -30,7 +30,7 @@
     "@hufe921/canvas-editor-plugin-codeblock": "workspace:*",
     "@hufe921/canvas-editor-plugin-comment": "workspace:*",
     "@hufe921/canvas-editor-plugin-diagram": "workspace:*",
-    "@hufe921/canvas-editor-plugin-docx": "workspace:*",
+    "@baohu/canvas-editor-plugin-docx": "workspace:*",
     "@hufe921/canvas-editor-plugin-excel": "workspace:*",
     "@hufe921/canvas-editor-plugin-find-replace": "workspace:*",
     "@hufe921/canvas-editor-plugin-floating-toolbar": "workspace:*",

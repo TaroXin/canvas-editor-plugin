@@ -11,7 +11,7 @@ import {
   ImageDisplay,
   PaperDirection,
   NumberType
-} from '@hufe921/canvas-editor'
+} from '@baohu/canvas-editor'
 import {
   Document,
   Packer,
@@ -787,7 +787,7 @@ export interface IExportDocxOption {
   toc?: boolean
 }
 
-declare module '@hufe921/canvas-editor' {
+declare module '@baohu/canvas-editor' {
   interface Command {
     executeExportDocx(options: IExportDocxOption): Promise<Blob>
   }
