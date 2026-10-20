@@ -2,7 +2,7 @@
   "name": "@baohu/canvas-editor-plugin-docx",
   "author": "Hufe",
   "license": "MIT",
-  "version": "1.0.0-baohu.1",
+  "version": "1.0.0-baohu.2",
   "description": "docx plugin for canvas-editor",
   "type": "module",
   "publishConfig": {

@@ -17,7 +17,7 @@ import { measureFontMetrics, parseDocxNumber } from './utils'
 
 declare module '@baohu/canvas-editor' {
   interface Command {
-    executeImportDocx(options: IImportDocxOption): void
+    executeImportDocx(options: IImportDocxOption): Promise<void>
   }
 }
 
@@ -39,6 +39,25 @@ function elementChildren(element: Element): Element[] {
     if (node.nodeType === 1) children.push(node as Element)
   }
   return children
+}
+
+// 表格结构子节点：行、单元格可能被内容控件（w:sdt > w:sdtContent）或
+// w:customXml 包裹，需要穿透包裹层查找
+function structuralChildren(element: Element, tagName: string): Element[] {
+  const result: Element[] = []
+  for (const child of elementChildren(element)) {
+    if (child.tagName === tagName) {
+      result.push(child)
+    } else if (child.tagName === 'w:sdt') {
+      const sdtContent = elementChildren(child).find(
+        el => el.tagName === 'w:sdtContent'
+      )
+      if (sdtContent) result.push(...structuralChildren(sdtContent, tagName))
+    } else if (child.tagName === 'w:customXml') {
+      result.push(...structuralChildren(child, tagName))
+    }
+  }
+  return result
 }
 
 function twipToPx(twip: number): number {
@@ -1662,22 +1681,25 @@ class DocxParser {
         }
       }
     }
-    // 行/格（直属），展开逻辑属性
-    const rows = elementChildren(tbl).filter(child => child.tagName === 'w:tr')
+    // 行/格（直属，穿透 w:sdt / w:customXml 包裹），展开逻辑属性
+    const rows = structuralChildren(tbl, 'w:tr')
     interface LogicalCell {
       tc: Element
       colspan: number
       vMerge: 'restart' | 'continue' | null
     }
     const logicalRows: LogicalCell[][] = rows.map(tr =>
-      elementChildren(tr)
-        .filter(child => child.tagName === 'w:tc')
+      structuralChildren(tr, 'w:tc')
         .map(tc => {
+          // 只取本格的 tcPr，避免读到嵌套表格的属性
+          const tcPr = elementChildren(tc).find(
+            child => child.tagName === 'w:tcPr'
+          )
           const colspan =
             parseDocxNumber(
-              tc.getElementsByTagName('w:gridSpan')[0]?.getAttribute('w:val')
+              tcPr?.getElementsByTagName('w:gridSpan')[0]?.getAttribute('w:val')
             ) || 1
-          const vMergeElement = tc.getElementsByTagName('w:vMerge')[0]
+          const vMergeElement = tcPr?.getElementsByTagName('w:vMerge')[0]
           const vMerge = vMergeElement
             ? vMergeElement.getAttribute('w:val') === 'restart'
               ? 'restart'
