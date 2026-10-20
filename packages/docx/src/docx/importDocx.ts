@@ -10,7 +10,9 @@ import {
   TitleLevel,
   ImageDisplay,
   TdBorder,
-  ControlType
+  TableBorder,
+  ControlType,
+  CheckboxMarkType
 } from '@baohu/canvas-editor'
 import JSZip from 'jszip'
 import { measureFontMetrics, parseDocxNumber } from './utils'
@@ -25,6 +27,8 @@ export interface IImportDocxOption {
   arrayBuffer: ArrayBuffer
   // 追加模式：导入内容插入到当前文档末尾，不覆盖已有内容（#36）
   isAppend?: boolean
+  // 复选框样式：文档未明确为勾选（☑）的复选框使用此样式，默认叉选（☒）
+  checkboxMarkType?: CheckboxMarkType
 }
 
 // 单位换算：1px = 15twip = 9525EMU；docx 字号为半磅
@@ -58,6 +62,89 @@ function structuralChildren(element: Element, tagName: string): Element[] {
     }
   }
   return result
+}
+
+// 选中符号：勾 ☑ ✓ ✔ √，叉 ☒ ✕ ✖ ✗ ✘
+const CHECK_MARK_CODES = [0x2611, 0x2713, 0x2714, 0x221a]
+const CROSS_MARK_CODES = [0x2612, 0x2715, 0x2716, 0x2717, 0x2718]
+
+function markTypeOfCode(code: number): CheckboxMarkType | undefined {
+  if (CHECK_MARK_CODES.includes(code)) return CheckboxMarkType.CHECK
+  if (CROSS_MARK_CODES.includes(code)) return CheckboxMarkType.CROSS
+  return undefined
+}
+
+// 符号字体中的复选框字形（w:sym 的 w:char 取低字节）
+// checked: null 未选中；markType: 选中符号为勾时为 CHECK，叉为 CROSS
+const SYMBOL_CHECKBOX: Record<
+  string,
+  Record<number, { checked: boolean; markType?: CheckboxMarkType }>
+> = {
+  'Wingdings 2': {
+    0xa3: { checked: false },
+    0x52: { checked: true, markType: CheckboxMarkType.CHECK },
+    0x53: { checked: true, markType: CheckboxMarkType.CROSS },
+    0x54: { checked: true, markType: CheckboxMarkType.CROSS }
+  },
+  Wingdings: {
+    0xa8: { checked: false },
+    0x6f: { checked: false },
+    0xfe: { checked: true, markType: CheckboxMarkType.CHECK },
+    0xfd: { checked: true, markType: CheckboxMarkType.CROSS },
+    0x78: { checked: true, markType: CheckboxMarkType.CROSS }
+  }
+}
+
+// 文本中的复选框字符：☐ ☑ ☒
+const CHECKBOX_CHAR_REG = /[\u2610-\u2612]/
+
+// 边框：表格级六条（上下左右 + 内部横竖），单元格级四条
+type BorderSide = 'top' | 'right' | 'bottom' | 'left'
+type TableBorderSide = BorderSide | 'insideH' | 'insideV'
+type TableBorderSpec = Partial<Record<TableBorderSide, boolean>>
+type BorderOwner = { borderTypes?: TdBorder[] }
+
+// w:start / w:end 为 w:left / w:right 的新写法
+const BORDER_TAGS: Record<TableBorderSide, string[]> = {
+  top: ['w:top'],
+  right: ['w:right', 'w:end'],
+  bottom: ['w:bottom'],
+  left: ['w:left', 'w:start'],
+  insideH: ['w:insideH'],
+  insideV: ['w:insideV']
+}
+
+// 读取边框声明：true 有线，false 显式无线（nil/none），undefined 未声明
+function readBorderSide(
+  borders: Element | undefined,
+  side: TableBorderSide
+): boolean | undefined {
+  if (!borders) return undefined
+  const border = elementChildren(borders).find(child =>
+    BORDER_TAGS[side].includes(child.tagName)
+  )
+  if (!border) return undefined
+  const val = border.getAttribute('w:val') || ''
+  return val !== 'nil' && val !== 'none'
+}
+
+function readTableBorders(tblBorders: Element | undefined): TableBorderSpec {
+  const spec: TableBorderSpec = {}
+  for (const side of Object.keys(BORDER_TAGS) as TableBorderSide[]) {
+    const value = readBorderSide(tblBorders, side)
+    if (value !== undefined) spec[side] = value
+  }
+  return spec
+}
+
+// 直属子元素：w:tblPr > w:tblBorders 等，避免读到嵌套表格或条件样式
+function childByTag(
+  element: Element | undefined,
+  tagName: string
+): Element | undefined {
+  return element
+    ? elementChildren(element).find(child => child.tagName === tagName)
+    : undefined
 }
 
 function twipToPx(twip: number): number {
@@ -433,6 +520,9 @@ class DocxParser {
   private zip: JSZip
   private headingByStyleId = new Map<string, TitleLevel>()
   private styleRPrById = new Map<string, RunStyle>()
+  // 表格样式（含 basedOn 继承）的边框，及默认表格样式 id
+  private tableBordersByStyleId = new Map<string, TableBorderSpec>()
+  private defaultTableStyleId: string | null = null
   // numId -> 每级列表类型
   private listTypeByNumId = new Map<
     string,
@@ -454,8 +544,23 @@ class DocxParser {
     external: Map<string, string>
   } | null = null
 
-  constructor(zip: JSZip) {
+  // 未明确勾/叉样式的复选框使用的样式
+  private checkboxMarkType: CheckboxMarkType
+
+  constructor(zip: JSZip, checkboxMarkType = CheckboxMarkType.CROSS) {
     this.zip = zip
+    this.checkboxMarkType = checkboxMarkType
+  }
+
+  private createCheckbox(
+    checked: boolean,
+    markType?: CheckboxMarkType
+  ): IElement {
+    return {
+      value: '',
+      type: ElementType.CHECKBOX,
+      checkbox: { value: checked, markType: markType || this.checkboxMarkType }
+    }
   }
 
   private async getDocumentRels() {
@@ -607,9 +712,21 @@ class DocxParser {
     }
     const basedOnById = new Map<string, string>()
     const rawRPrById = new Map<string, Element | null>()
+    const rawTableBordersById = new Map<string, TableBorderSpec>()
     for (const style of Array.from(dom.getElementsByTagName('w:style'))) {
       const id = style.getAttribute('w:styleId')
       if (!id) continue
+      if (style.getAttribute('w:type') === 'table') {
+        rawTableBordersById.set(
+          id,
+          readTableBorders(
+            childByTag(childByTag(style, 'w:tblPr'), 'w:tblBorders')
+          )
+        )
+        if (style.getAttribute('w:default') === '1') {
+          this.defaultTableStyleId = id
+        }
+      }
       // 默认段落样式（Normal）：无 pStyle 段落的字号/字体来源
       if (
         style.getAttribute('w:type') === 'paragraph' &&
@@ -658,6 +775,17 @@ class DocxParser {
     }
     for (const id of Array.from(rawRPrById.keys())) {
       this.styleRPrById.set(id, resolve(id))
+    }
+    const resolveTableBorders = (id: string, depth = 0): TableBorderSpec => {
+      if (depth > 5) return {}
+      const basedOn = basedOnById.get(id)
+      return {
+        ...(basedOn ? resolveTableBorders(basedOn, depth + 1) : {}),
+        ...rawTableBordersById.get(id)
+      }
+    }
+    for (const id of Array.from(rawTableBordersById.keys())) {
+      this.tableBordersByStyleId.set(id, resolveTableBorders(id))
     }
   }
 
@@ -1389,10 +1517,21 @@ class DocxParser {
       const tag = child.tagName
       if (tag === 'w:t') {
         const text = child.textContent || ''
-        if (text) {
-          const { verticalType, ...runStyle } = style
+        const { verticalType, ...runStyle } = style
+        // 文本中的 ☐ ☑ ☒ 转为复选框
+        for (const part of text.split(/([\u2610-\u2612])/)) {
+          if (!part) continue
+          if (CHECKBOX_CHAR_REG.test(part)) {
+            elements.push(
+              this.createCheckbox(
+                part !== '\u2610',
+                markTypeOfCode(part.charCodeAt(0))
+              )
+            )
+            continue
+          }
           elements.push({
-            value: text,
+            value: part,
             type:
               verticalType === 'superscript'
                 ? ElementType.SUPERSCRIPT
@@ -1401,6 +1540,15 @@ class DocxParser {
                   : ElementType.TEXT,
             ...runStyle
           })
+        }
+      } else if (tag === 'w:sym') {
+        // 符号字体（Wingdings）绘制的复选框
+        const symbol =
+          SYMBOL_CHECKBOX[child.getAttribute('w:font') || '']?.[
+            parseInt(child.getAttribute('w:char') || '', 16) & 0xff
+          ]
+        if (symbol) {
+          elements.push(this.createCheckbox(symbol.checked, symbol.markType))
         }
       } else if (tag === 'w:br') {
         if (child.getAttribute('w:type') === 'page') {
@@ -1459,11 +1607,14 @@ class DocxParser {
           .getElementsByTagName('w14:checked')[0]
           ?.getAttribute('w14:val') || ''
       )
-      return {
-        value: '',
-        type: ElementType.CHECKBOX,
-        checkbox: { value: checked }
-      }
+      // 选中符号（十六进制码位），未声明时使用默认样式
+      const checkedCode = parseInt(
+        checkbox
+          .getElementsByTagName('w14:checkedState')[0]
+          ?.getAttribute('w14:val') || '',
+        16
+      )
+      return this.createCheckbox(checked, markTypeOfCode(checkedCode))
     }
     // 下拉 / 组合框
     const dropDown =
@@ -1535,11 +1686,7 @@ class DocxParser {
         !['0', 'false', 'off'].includes(
           checkedElement.getAttribute('w:val') || ''
         )
-      return {
-        value: '',
-        type: ElementType.CHECKBOX,
-        checkbox: { value: checked }
-      }
+      return this.createCheckbox(checked)
     }
     const ddList = ffData.getElementsByTagName('w:ddList')[0]
     if (ddList) {
@@ -1752,54 +1899,52 @@ class DocxParser {
       center: VerticalAlign.MIDDLE,
       bottom: VerticalAlign.BOTTOM
     }
+    type Td = NonNullable<IElement['trList']>[number]['tdList'][number]
+    // 网格（行 × 网格列）上每个位置所属的单元格与 w:tc：
+    // 纵向合并的后续行指向首行单元格，tc 仍为本行的 w:tc（下边框取最后一行）
+    const gridTd: (Td | undefined)[][] = []
+    const gridTc: (Element | undefined)[][] = []
     const trList: IElement['trList'] = []
     for (let r = 0; r < logicalRows.length; r++) {
-      const tdList: NonNullable<IElement['trList']>[number]['tdList'] = []
+      const tdList: Td[] = []
+      gridTd[r] = []
+      gridTc[r] = []
       for (let c = 0; c < logicalRows[r].length; c++) {
         const cell = logicalRows[r][c]
-        if (cell.vMerge === 'continue') continue
-        const rowspan =
-          cell.vMerge === 'restart' ? rowspanOf(r, c, cell.colspan) : 1
-        const tcPr = cell.tc.getElementsByTagName('w:tcPr')[0] || null
-        const tcW = parseDocxNumber(
-          tcPr?.getElementsByTagName('w:tcW')[0]?.getAttribute('w:w')
-        )
-        const vAlign = tcPr
-          ?.getElementsByTagName('w:vAlign')[0]
-          ?.getAttribute('w:val')
-        const backgroundColor = normalizeColor(
-          tcPr?.getElementsByTagName('w:shd')[0]?.getAttribute('w:fill') ?? null
-        )
-        // 单元格边框（显式声明的边）
-        const borderTypes: TdBorder[] = []
-        const tcBorders = tcPr?.getElementsByTagName('w:tcBorders')[0]
-        if (tcBorders) {
-          const sides: [string, TdBorder][] = [
-            ['w:top', TdBorder.TOP],
-            ['w:right', TdBorder.RIGHT],
-            ['w:bottom', TdBorder.BOTTOM],
-            ['w:left', TdBorder.LEFT]
-          ]
-          for (const [xmlSide, side] of sides) {
-            const val = tcBorders
-              .getElementsByTagName(xmlSide)[0]
-              ?.getAttribute('w:val')
-            if (val && val !== 'nil' && val !== 'none') {
-              borderTypes.push(side)
-            }
+        const gridStart = gridStartOf(r, c)
+        let td: Td | undefined
+        if (cell.vMerge === 'continue') {
+          td = gridTd[r - 1]?.[gridStart]
+        } else {
+          const rowspan =
+            cell.vMerge === 'restart' ? rowspanOf(r, c, cell.colspan) : 1
+          const tcPr = cell.tc.getElementsByTagName('w:tcPr')[0] || null
+          const tcW = parseDocxNumber(
+            tcPr?.getElementsByTagName('w:tcW')[0]?.getAttribute('w:w')
+          )
+          const vAlign = tcPr
+            ?.getElementsByTagName('w:vAlign')[0]
+            ?.getAttribute('w:val')
+          const backgroundColor = normalizeColor(
+            tcPr?.getElementsByTagName('w:shd')[0]?.getAttribute('w:fill') ??
+              null
+          )
+          td = {
+            colspan: cell.colspan,
+            rowspan,
+            value: trimTrailingBreaks(this.parseBlockContainer(cell.tc, ctx)),
+            ...(tcW ? { width: twipToPx(tcW) } : {}),
+            ...(vAlign && verticalAlignMap[vAlign]
+              ? { verticalAlign: verticalAlignMap[vAlign] }
+              : {}),
+            ...(backgroundColor ? { backgroundColor } : {})
           }
+          tdList.push(td)
         }
-        tdList.push({
-          colspan: cell.colspan,
-          rowspan,
-          value: trimTrailingBreaks(this.parseBlockContainer(cell.tc, ctx)),
-          ...(tcW ? { width: twipToPx(tcW) } : {}),
-          ...(vAlign && verticalAlignMap[vAlign]
-            ? { verticalAlign: verticalAlignMap[vAlign] }
-            : {}),
-          ...(backgroundColor ? { backgroundColor } : {}),
-          ...(borderTypes.length ? { borderTypes } : {})
-        })
+        for (let g = gridStart; g < gridStart + cell.colspan; g++) {
+          gridTd[r][g] = td
+          gridTc[r][g] = cell.tc
+        }
       }
       const trHeight = parseDocxNumber(
         rows[r]
@@ -1812,12 +1957,95 @@ class DocxParser {
         tdList
       })
     }
+    const borderType = this.applyTableBorders(tbl, gridTd, gridTc)
     return {
       value: '\n',
       type: ElementType.TABLE,
+      ...(borderType ? { borderType } : {}),
       ...(colgroup.length ? { colgroup } : {}),
       trList
     }
+  }
+
+  // 表格边框：按 Word 规则计算每段线是否可见
+  // （单元格 tcBorders > 表格 tblBorders > 表格样式；相邻单元格任一侧有线即可见），
+  // 全部可见时沿用编辑器默认的“所有框线”；否则表格设为无框线，
+  // 每段可见线只记到一个单元格上（上方单元格的下边 / 左侧单元格的右边），避免重复绘制
+  private applyTableBorders(
+    tbl: Element,
+    gridTd: (BorderOwner | undefined)[][],
+    gridTc: (Element | undefined)[][]
+  ): TableBorder | null {
+    const tblPr = childByTag(tbl, 'w:tblPr')
+    const styleId =
+      childByTag(tblPr, 'w:tblStyle')?.getAttribute('w:val') ||
+      this.defaultTableStyleId
+    const tableSpec: TableBorderSpec = {
+      ...(styleId ? this.tableBordersByStyleId.get(styleId) : {}),
+      ...readTableBorders(childByTag(tblPr, 'w:tblBorders'))
+    }
+    const rowCount = gridTd.length
+    const colCount = Math.max(0, ...gridTd.map(row => row.length))
+    const sideOn = (
+      tc: Element | undefined,
+      side: BorderSide,
+      isOuter: boolean
+    ): boolean => {
+      if (!tc) return false
+      const tcBorders = childByTag(childByTag(tc, 'w:tcPr'), 'w:tcBorders')
+      const cellValue = readBorderSide(tcBorders, side)
+      if (cellValue !== undefined) return cellValue
+      if (isOuter) return !!tableSpec[side]
+      return !!tableSpec[side === 'top' || side === 'bottom' ? 'insideH' : 'insideV']
+    }
+    const sidesByTd = new Map<BorderOwner, Set<TdBorder>>()
+    let total = 0
+    let visible = 0
+    const record = (
+      owner: BorderOwner,
+      side: TdBorder,
+      isVisible: boolean
+    ) => {
+      total++
+      if (!isVisible) return
+      visible++
+      if (!sidesByTd.has(owner)) sidesByTd.set(owner, new Set())
+      sidesByTd.get(owner)!.add(side)
+    }
+    // 横线：第 r 行上边界
+    for (let r = 0; r <= rowCount; r++) {
+      const isOuter = r === 0 || r === rowCount
+      for (let c = 0; c < colCount; c++) {
+        const above = gridTd[r - 1]?.[c]
+        const below = gridTd[r]?.[c]
+        if ((!above && !below) || above === below) continue
+        const isVisible =
+          sideOn(gridTc[r - 1]?.[c], 'bottom', isOuter) ||
+          sideOn(gridTc[r]?.[c], 'top', isOuter)
+        if (above) record(above, TdBorder.BOTTOM, isVisible)
+        else record(below!, TdBorder.TOP, isVisible)
+      }
+    }
+    // 竖线：第 c 列左边界
+    for (let r = 0; r < rowCount; r++) {
+      for (let c = 0; c <= colCount; c++) {
+        const isOuter = c === 0 || c === colCount
+        const left = gridTd[r][c - 1]
+        const right = gridTd[r][c]
+        if ((!left && !right) || left === right) continue
+        const isVisible =
+          sideOn(gridTc[r][c - 1], 'right', isOuter) ||
+          sideOn(gridTc[r][c], 'left', isOuter)
+        if (left) record(left, TdBorder.RIGHT, isVisible)
+        else record(right!, TdBorder.LEFT, isVisible)
+      }
+    }
+    if (visible === total) return null
+    const order = [TdBorder.TOP, TdBorder.RIGHT, TdBorder.BOTTOM, TdBorder.LEFT]
+    sidesByTd.forEach((sides, td) => {
+      td.borderTypes = order.filter(side => sides.has(side))
+    })
+    return TableBorder.EMPTY
   }
 }
 
@@ -1830,7 +2058,7 @@ export default function (command: Command) {
   return async function (options: IImportDocxOption) {
     const { arrayBuffer, isAppend } = options
     const zip = await JSZip.loadAsync(arrayBuffer)
-    const parser = new DocxParser(zip)
+    const parser = new DocxParser(zip, options.checkboxMarkType)
     const { watermark, pageSetup, disabledPages, ...data } =
       await parser.parse()
     // 追加模式：仅插入正文到文档末尾，不覆盖已有内容

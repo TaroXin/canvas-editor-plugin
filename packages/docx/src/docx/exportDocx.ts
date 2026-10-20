@@ -7,6 +7,7 @@ import {
   Editor,
   RowFlex,
   TableBorder,
+  TdBorder,
   VerticalAlign,
   ImageDisplay,
   PaperDirection,
@@ -160,6 +161,18 @@ function getTableBorders(borderType?: TableBorder) {
       }
     default:
       return undefined
+  }
+}
+
+// 单元格单独设置的边框
+function getTableCellBorders(borderTypes?: TdBorder[]) {
+  if (!borderTypes?.length) return undefined
+  const border = { style: BorderStyle.SINGLE, size: 1, color: '#000000' }
+  return {
+    ...(borderTypes.includes(TdBorder.TOP) ? { top: border } : {}),
+    ...(borderTypes.includes(TdBorder.RIGHT) ? { right: border } : {}),
+    ...(borderTypes.includes(TdBorder.BOTTOM) ? { bottom: border } : {}),
+    ...(borderTypes.includes(TdBorder.LEFT) ? { left: border } : {})
   }
 }
 
@@ -495,6 +508,7 @@ async function convertElementListToDocxChildren(
                 ? { fill: Color(td.backgroundColor).hex() }
                 : undefined,
               verticalAlign: getCellVerticalAlign(td.verticalAlign),
+              borders: getTableCellBorders(td.borderTypes),
               width: td.width
                 ? { size: pxToTwip(td.width), type: WidthType.DXA }
                 : undefined,

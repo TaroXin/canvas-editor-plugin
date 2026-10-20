@@ -24,6 +24,20 @@ instance.command.executeExportDocx({
 })
 ```
 
+Checkboxes in the document (content controls, legacy form fields, `☐☑☒`
+characters and Wingdings box symbols) are imported as checkbox elements. Those
+not explicitly drawn as a tick (☑) or a cross (☒) use `checkboxMarkType`,
+which defaults to `CheckboxMarkType.CROSS`:
+
+```javascript
+import { CheckboxMarkType } from '@baohu/canvas-editor'
+
+await command.executeImportDocx({
+  arrayBuffer: buffer,
+  checkboxMarkType: CheckboxMarkType.CHECK
+})
+```
+
 The export always returns a Blob. By default it also downloads the file. Set
 `download: false` to let the application upload, preview or download it itself:
 
